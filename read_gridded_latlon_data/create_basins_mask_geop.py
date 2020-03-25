@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 # =================================================================================================================== #
-# - Written by Enrico Ciraci - 04/24/2019
+# - Written by Enrico Ciraci - 03/24/2020
 # =================================================================================================================== #
 # - Create Basins Binary Mask given:
 # -
@@ -19,21 +19,21 @@
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - #
 #     To Run this procedure digit:
 #
-#     python create_basins_mask.py
+#     python create_basins_mask_geop.py
 # =================================================================================================================== #
 # PYTHON DEPENDENCIES:
 #	numpy: Scientific Computing Tools For Python (http://www.numpy.org)
 #   netCDF4: python/numpy interface to netCDF library (https://pypi.python.org/pypi/netCDF4)
 #   getopt: C-style parser for command line options (https://docs.python.org/2/library/getopt.html)
-#   xarray: xarray: N-D labeled arrays and datasets in Python (http://xarray.pydata.org)
-#   pyshp: This library reads and writes ESRI Shapefiles in pure Python. (https://github.com/GeospatialPython/pyshp)
 #   shapely: Manipulation and analysis of geometric objects in the Cartesian plane. (https://shapely.readthedocs.
 #            io/en/stable/manual.html)
-#   concurrent.futures: https://docs.python.org/3/library/concurrent.futures.html
+#   geopandas: GeoPandas is an open source project to make working with geospatial data in python easier.
+#           (https://geopandas.org/)
+#
 # PROGRAM DEPENDENCIES:
 #   enrico_library: https://github.com/uci-gravity/Enrico
 # =================================================================================================================== #
-# - UPDATE - 
+# - UPDATE -
 # =================================================================================================================== #
 # IMPORTANT:
 # =================================================================================================================== #
@@ -46,10 +46,9 @@ import numpy as np
 import netCDF4 as nC4
 import getopt
 import shapefile
-from shapely.geometry import shape, Point, polygon
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
+from shapely.geometry import Point
 from time import time
+import geopandas as gpd
 
 
 def write_point_shapefile(output_path_shp, lat_vect, lon_vect, attribute_vect, attribute_name=''):
@@ -60,7 +59,7 @@ def write_point_shapefile(output_path_shp, lat_vect, lon_vect, attribute_vect, a
     :param lon_vect: vector containing the longitude points coordinates
     :param attribute_vect: vector containing the discharge magnitude
     :param attribute_name: name of the attribute
-    :return: 
+    :return:
     """
     # - python
     w = shapefile.Writer(output_path_shp[:-4], shapeType=1)
@@ -117,39 +116,6 @@ def calculate_area_mask_vect(lat_vect, lon_vect):
     return out_mask
 
 
-def from_shp_to_polygon(path_to_shape, buffer_p=0.5):
-    """
-    Read the input shapefile and return a list of polygon objects
-    :param path_to_shape: absolute path to the input shapefile
-    :param buffer_p: boundary buffer in degree
-    :return:
-    """
-    # - open the shapefile using the python fiona package
-    region_list = list()
-    # - read the input regional shapefile
-    pol = shapefile.Reader(path_to_shape)
-    # - extract polygon-shapes
-    sub = pol.shapes()
-    # - Build the regional ice-covered region domain
-    for ss in range(0, len(sub)):
-        if len(sub[ss].parts) > 1:
-            # - the shapefile is composed by multiple parts defining an external ring and one ore more
-            # - interior holes
-            limits = sub[ss].parts
-            holes = []  # - holes boundaries
-            for x in range(2, len(limits)):
-                holes.append(sub[ss].points[limits[x - 1]:limits[x]])
-            # - define polygon with holes
-            shp_tmp = polygon.Polygon(sub[ss].points[limits[0]:limits[1]], holes)
-        else:
-            # - polygon composed only by an external ring
-            shp_tmp = shape(sub[ss]).buffer(buffer_p)
-
-        region_list.append(shp_tmp)
-    # -
-    return region_list
-
-
 def write_netcdf_mask(binary_mask, area_mask, lat, lon, file_to_save):
     """
     Write spatial field in a netcdf archive
@@ -202,40 +168,20 @@ def write_netcdf_mask(binary_mask, area_mask, lat, lon, file_to_save):
     rootgrp.close()
 
 
-def parallel_code(data_dict):
-    """
-    Contains the portion of the code that is executed in parallel
-    :param data_dict: python dictionary containing the input parameters
-    :return:
-    """
-    lon_s = data_dict['lon_s']
-    lat_s = data_dict['lat_s']
-    xy_point = Point(lon_s, lat_s)
-    region_list = data_dict['rl']
-    out_index = -9999.
-    for rl in region_list:
-        if xy_point.within(rl):
-            out_index = data_dict['index']
-            break
-    return out_index
-
-
 def main():
     """
     Main Section of the script.
     :return:
     """
     # -- Read the system arguments listed after the program and run the program
-    long_options = ['basins=', 'buffer=', 'nproc=']
+    long_options = ['basins=', 'buffer=']
     try:
-        optlist = getopt.getopt(sys.argv[1:], 'S:B:N:', long_options)
+        optlist = getopt.getopt(sys.argv[1:], 'S:B:', long_options)
     except ValueError:
         optlist = list()
 
     # - list of the river basin to consider
     basin_list = ['indus_river']
-    # - uses by default a number of simultaneous processes equal to the number of CPUs
-    max_processes = None
     # - basin boundaries buffer
     buffer_p = 0.
     try:
@@ -247,16 +193,13 @@ def main():
             elif opt in ("-B", "--buffer"):
                 # - Basin boundary buffer
                 buffer_p = float(arg)
-            elif opt in ("-N", "--nproc"):
-                # - number of simultaneous processes
-                max_processes = int(arg)
     except ValueError:
         pass
     start = time()
-    
+
     # - input/output data directory
-    input_dir = os.path.join('.', 'input')
-    output_dir = verify_and_create_dir('.', 'output')
+    input_dir = os.path.join('.', 'masks', 'input')
+    output_dir = verify_and_create_dir(os.path.join('.', 'masks'), 'output')
 
     # - lat/lon arrays
     lat_vect = np.arange(-90,  90+1, 1)
@@ -266,6 +209,12 @@ def main():
     l_lon_vect = l_lon.flatten()
     l_lat_vect = l_lat.flatten()
 
+    # - Create GeoPandas Data Frame containing the reference let/lon grid
+    xy_point = gpd.GeoSeries([Point(x, y) for x, y in list(zip(l_lon_vect, l_lat_vect))])
+    df1 = gpd.GeoDataFrame({'geometry': xy_point,
+                            'df1': np.arange(len(l_lon_vect)),
+                            'lon': l_lon_vect, 'lat': l_lat_vect})
+
     # - calculate a global area mask in cm2 ad the model resolution
     area_mask = np.transpose(calculate_area_mask_vect(lat_vect, lon_vect))
 
@@ -274,32 +223,21 @@ def main():
         print('# - Create Basins Mask.')
         for basin in basin_list:
             print('# - ' + basin)
-            # - load basin mask
-            b_info = dict()
-            b_info['basin_boundary'] = os.path.join(input_dir, basin, basin+'.shp')
+            # - create output directory
             out_dir_reg = verify_and_create_dir(output_dir, basin)
-            # - read regional shapefile and convert it to a shapely polygon object
-            region_list = from_shp_to_polygon(b_info['basin_boundary'], buffer_p=buffer_p)
-            # - list that will contain the indexes of the points within the region of interest
-            tot_ind = list()
-            # - parallel portion of the code
-            processes = []
-            with ThreadPoolExecutor(max_workers=max_processes) as executor:
-                for ll in tqdm(range(0, len(l_lon_vect)), ncols=50):
-                    lon_s = l_lon_vect[ll]
-                    lat_s = l_lat_vect[ll]
-                    # -
-                    data_dict = dict()
-                    data_dict['lon_s'] = lon_s
-                    data_dict['lat_s'] = lat_s
-                    data_dict['index'] = ll
-                    data_dict['rl'] = region_list
-                    processes.append(executor.submit(parallel_code, data_dict))
+            # - load basin boundaries mask into a GeoPandas Data Frame
+            shp_path = os.path.join(input_dir, basin, basin+'.shp')
+            basin_mask_gdf = gpd.read_file(shp_path)
+            basin_mask_geoseries = gpd.GeoSeries([x for x in basin_mask_gdf['geometry']])
+            df2 = gpd.GeoDataFrame({'geometry': basin_mask_geoseries,
+                                    'df2': np.arange(len(basin_mask_gdf['geometry']))})
+            df2['geometry'] = df2.geometry.buffer(buffer_p)
 
-            for res in as_completed(processes):
-                res_out = res.result()
-                if res_out != -9999.:
-                    tot_ind.append(res_out)
+            # - Use GeoPandas spatial Join to find the grid points within the considered
+            # - basin,
+            res_within = gpd.sjoin(df1, df2, op='within')
+            tot_ind = list(res_within['df1'])
+
             # - Save the obtained mask
             out_lat = np.array(l_lat_vect)[tot_ind]
             out_lon = np.array(l_lon_vect)[tot_ind]
